@@ -29,7 +29,6 @@ CtClass又能找到类的方法、构造器、字段等（类似反射API)，然
 最终通过CtClass.makeFile、CtClass.toByteArray等方法把修改完成的类写入到一个文件或者返回一个byte数组
 
 下面是一个读取一个类，修改它继承的父类，然后把修改好的class写入到一个文件夹里，并且用`Thread.currentThread().contextClassLoader()`加载这个类、生成一个实例并调用的例子
-
 ```java
 ClassPool classPool = ClassPool.getDefault();
 // get ctClass (compile time class)
@@ -44,7 +43,6 @@ o.print();
 ```
 
 CtClass也可以通过传入一个byte数组来生成，例如下面是一个常见的`Instrumentation`的实例
-
 ```java
 Instrumentation instrumentation = ByteBuddyAgent.install();
 instrumentation.addTransformer(new ClassFileTransformer() {
@@ -183,6 +181,99 @@ for (CtMethod declaredMethod : declaredMethods) {
 
     }
 }
+```
+
+对比一下使用ASM做同样的事情需要多少代码量
+
+```java
+public static void instrumentProfile() {
+    Instrumentation install = ByteBuddyAgent.install();
+    install.addTransformer(new ClassFileTransformer() {
+        @Override
+        public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined, ProtectionDomain protectionDomain, byte[] classfileBuffer) throws IllegalClassFormatException {
+            if (className.contains("TestClass")) {
+                ClassReader classReader = new ClassReader(classfileBuffer);
+                ClassWriter classWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
+                classReader.accept(new ProfileVisitor(classWriter), ClassReader.SKIP_FRAMES);
+                return classWriter.toByteArray();
+            }
+            return classfileBuffer;
+        }
+    });
+    TestClass testClass = new TestClass();
+    testClass.hello();
+
+}
+
+private static class ProfileVisitor extends ClassVisitor {
+
+    public ProfileVisitor(ClassWriter cw) {
+        super(ASM5, cw);
+    }
+
+    @Override
+    public void visitEnd() {
+        cv.visitField(ACC_PRIVATE + ACC_STATIC, "timer", "J", null, null);
+        super.visitEnd();
+    }
+
+    @Override
+    public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
+        MethodVisitor mv = cv.visitMethod(access, name, descriptor, signature, exceptions);
+        if (!name.equals("<init>") && !Modifier.isAbstract(access)) {
+            return new MethodProfiler(mv);
+        }
+        return mv;
+    }
+}
+
+private static class MethodProfiler extends MethodVisitor {
+
+    public MethodProfiler(MethodVisitor mv) {
+        super(ASM5, mv);
+    }
+
+    @Override
+    public void visitCode() {
+        super.visitCode();
+        mv.visitFieldInsn(GETSTATIC, "com/github/lzy/asm/learn/TestClass", "timer", "J");
+        mv.visitMethodInsn(INVOKESTATIC, "java/lang/System", "currentTimeMillis", "()J", false);
+        mv.visitInsn(LSUB);
+        mv.visitFieldInsn(PUTSTATIC, "com/github/lzy/asm/learn/TestClass", "timer", "J");
+    }
+
+    @Override
+    public void visitInsn(int opcode) {
+        if (opcode >= IRETURN && opcode <= RETURN) {
+            mv.visitFieldInsn(GETSTATIC, "com/github/lzy/asm/learn/TestClass", "timer", "J");
+            mv.visitMethodInsn(INVOKESTATIC, "java/lang/System", "currentTimeMillis", "()J", false);
+            mv.visitInsn(LADD);
+            mv.visitFieldInsn(PUTSTATIC, "com/github/lzy/asm/learn/TestClass", "timer", "J");
+            mv.visitFieldInsn(GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+            mv.visitTypeInsn(NEW, "java/lang/StringBuilder");
+            mv.visitInsn(DUP);
+            mv.visitMethodInsn(INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", false);
+            mv.visitLdcInsn("Cost ");
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
+            mv.visitFieldInsn(GETSTATIC, "com/github/lzy/asm/learn/TestClass", "timer", "J");
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(J)Ljava/lang/StringBuilder;", false);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/StringBuilder", "toString", "()Ljava/lang/String;", false);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
+        }
+        mv.visitInsn(opcode);
+    }
+
+    @Override
+    public void visitEnd() {
+        super.visitEnd();
+    }
+
+    @Override
+    public void visitMaxs(int maxStack, int maxLocals) {
+        mv.visitMaxs(maxStack + 4, maxLocals);
+    }
+}
+```
 ctClass.toClass();
 ctClass.debugWriteFile("/tmp/javassist");
 Foo.method("hello");
@@ -195,7 +286,6 @@ javassist在执行的时候，会把外面上面用到的Java源代码在内存�
 - 不支持内部类。javassist可以读取、修改内部类匿名类
 - labeled continue、break不支持（这个用法很少）
 - Java的方法分派不能正确分派。
-
 
 
 
